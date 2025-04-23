@@ -9,6 +9,23 @@ from ppadb.utils.logger import AdbLogging
 logger = AdbLogging.get_logger(__name__)
 
 
+class ShellProtocolTypes:
+    # constants taken from adb/shell_protocol.h
+    STDIN = 0
+    STDOUT = 1
+    STDERR = 2
+    EXIT = 3
+
+    # Close subprocess stdin if possible.
+    CLOSE_STDIN = 4
+
+    # Window size change (an ASCII version of struct winsize).
+    WINDOW_SIZE_CHANGE = 5
+
+    # Indicates an invalid or unknown packet.
+    INVALID = 255
+
+
 class Transport(Command):
     def transport(self, connection):
         cmd = "host:transport:{}".format(self.serial)
@@ -27,7 +44,54 @@ class Transport(Command):
         else:
             result = conn.read_all()
             conn.close()
-            return result.decode('utf-8')
+            return result.decode("utf-8")
+
+    def shell_v2(self, cmd, handler=None, separate_stdout_stderr=False, timeout=None):
+        def read_int(conn, length):
+            data = conn.read(length)
+            if len(data) < length:
+                return None
+            else:
+                return int.from_bytes(data, "little")
+
+        conn = self.create_connection(timeout=timeout)
+
+        cmd = "shell,v2:{}".format(cmd)
+        conn.send(cmd)
+
+        if handler:
+            handler(conn)
+        else:
+            if separate_stdout_stderr:
+                stdout = ""
+                stderr = ""
+            else:
+                output = ""
+            exit_code = 255
+            while True:
+                id_ = read_int(conn, 1)
+                if id_ is None:
+                    break
+                length = read_int(conn, 4)
+                if length is None:
+                    break
+                data = conn.read(length)
+                if len(data) < length:
+                    break
+
+                if not separate_stdout_stderr and id_ in (ShellProtocolTypes.STDOUT, ShellProtocolTypes.STDERR):
+                    output += data.decode("utf-8")
+                elif id_ == ShellProtocolTypes.STDOUT:
+                    stdout += data.decode("utf-8")
+                elif id_ == ShellProtocolTypes.STDERR:
+                    stderr += data.decode("utf-8")
+                elif id_ == ShellProtocolTypes.EXIT:
+                    exit_code = int.from_bytes(data, "little")
+                # intentionally ignoring other IDs because they aren't necessary
+            if separate_stdout_stderr:
+                return (stdout, stderr, exit_code)
+            else:
+                return (output, exit_code)
 
     def sync(self):
         conn = self.create_connection()
